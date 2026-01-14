@@ -3,6 +3,7 @@
 CREATE TABLE IF NOT EXISTS users (
   wallet_address TEXT PRIMARY KEY,
   world_id_verified INTEGER NOT NULL DEFAULT 0,
+  nullifier_hash TEXT UNIQUE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

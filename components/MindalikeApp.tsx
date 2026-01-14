@@ -44,7 +44,6 @@ export default function MindalikeApp() {
   const [match, setMatch] = useState<MatchData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [queuePosition, setQueuePosition] = useState<number>(0);
-  const [isWorldApp, setIsWorldApp] = useState<boolean>(false);
   const [countdown, setCountdown] = useState<number>(5);
   const [dailyMatches, setDailyMatches] = useState<number>(0);
   const freeLimit = 5;
@@ -53,18 +52,6 @@ export default function MindalikeApp() {
   // WebSocket ref
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Check if running in World App
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const installed = MiniKit.isInstalled();
-      setIsWorldApp(installed);
-      
-      if (!installed) {
-        console.warn('MiniKit not installed - running in development mode');
-      }
-    }
-  }, []);
 
   // Handle WebSocket messages
   const handleWSMessage = useCallback((message: WSMessage) => {
@@ -129,7 +116,9 @@ export default function MindalikeApp() {
     const wsUrl = `${protocol}//${host}`;
     
     try {
-      const ws = new WebSocket(`${wsUrl}/ws?username=${encodeURIComponent(username)}`);
+      // Include wallet address for verification check
+      const walletParam = user?.walletAddress ? `&wallet=${encodeURIComponent(user.walletAddress)}` : '';
+      const ws = new WebSocket(`${wsUrl}/ws?username=${encodeURIComponent(username)}${walletParam}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -186,15 +175,14 @@ export default function MindalikeApp() {
   // Redirect to World Chat
   const redirectToChat = useCallback(async (matchedUsername: string) => {
     try {
-      if (MiniKit.isInstalled()) {
-        await MiniKit.commandsAsync.chat({
-          to: [matchedUsername],
-          message: `Hey! We matched on Mindalike 👋`,
-        });
-      } else {
-        console.log('Would redirect to chat with:', matchedUsername);
-        alert(`Development mode: Would open chat with ${matchedUsername}`);
+      if (!MiniKit.isInstalled()) {
+        throw new Error('MiniKit is not installed. Please open this app in World App.');
       }
+
+      await MiniKit.commandsAsync.chat({
+        to: [matchedUsername],
+        message: `Hey! We matched on Mindalike 👋`,
+      });
     } catch (e) {
       console.error('Failed to open chat:', e);
       setError('Failed to open chat. Please try again.');
@@ -208,13 +196,7 @@ export default function MindalikeApp() {
 
     try {
       if (!MiniKit.isInstalled()) {
-        setUser({
-          walletAddress: '0x' + Math.random().toString(16).slice(2, 42),
-          username: 'dev_user_' + Math.random().toString(36).slice(2, 8),
-          isVerified: false,
-        });
-        setAppState('verifying');
-        return;
+        throw new Error('MiniKit is not installed. Please open this app in World App.');
       }
 
       const nonceRes = await fetch('/api/nonce');
@@ -272,11 +254,7 @@ export default function MindalikeApp() {
 
     try {
       if (!MiniKit.isInstalled()) {
-        if (user) {
-          setUser({ ...user, isVerified: true });
-        }
-        setAppState('verified');
-        return;
+        throw new Error('MiniKit is not installed. Please open this app in World App.');
       }
 
       const appId = process.env.NEXT_PUBLIC_APP_ID;
@@ -313,6 +291,7 @@ export default function MindalikeApp() {
           payload: finalPayload,
           action: actionId,
           signal: user?.walletAddress,
+          wallet_address: user?.walletAddress,
         }),
       });
 
@@ -405,16 +384,15 @@ export default function MindalikeApp() {
     <div className="min-h-screen bg-bg-1 flex flex-col">
       {/* Header */}
       <header className="px-4 sm:px-6 py-4 flex items-center justify-between border-b border-border-primary bg-bg-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center">
           <Image
             src="/mindalike-logo.svg"
-            alt="Mindalike logo"
-            width={36}
+            alt="Mindalike"
+            width={120}
             height={36}
-            className="h-8 w-8 md:h-9 md:w-9"
+            className="h-8 md:h-9 w-auto"
             priority
           />
-          <span className="text-xl font-display font-bold gradient-text">Mindalike</span>
         </div>
         {user && (
           <div className="flex items-center gap-2 text-body-sm text-text-secondary">
@@ -428,7 +406,6 @@ export default function MindalikeApp() {
       <main className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 pb-8 pt-8 space-y-6 md:space-y-8">
         {appState === 'landing' && (
           <LandingView
-            isWorldApp={isWorldApp}
             onStart={handleWalletAuth}
           />
         )}
@@ -501,7 +478,7 @@ export default function MindalikeApp() {
 }
 
 // Landing View Component
-function LandingView({ isWorldApp, onStart }: { isWorldApp: boolean; onStart: () => void }) {
+function LandingView({ onStart }: { onStart: () => void }) {
   return (
     <div className="text-center max-w-md mx-auto w-full space-y-6 md:space-y-8">
       {/* Hero Icon with Glow */}
@@ -540,14 +517,6 @@ function LandingView({ isWorldApp, onStart }: { isWorldApp: boolean; onStart: ()
         >
           Get Started
         </Button>
-
-        {!isWorldApp && (
-          <Card variant="bordered" padding="sm" className="bg-amber-50 border-amber-200">
-            <p className="text-body-sm text-amber-800">
-              ⚠️ For the best experience, open this app in World App
-            </p>
-          </Card>
-        )}
       </div>
 
       {/* Features */}

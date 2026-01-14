@@ -216,7 +216,8 @@ export default {
         const { payload, action, signal } = await request.json() as { 
           payload: any; 
           action: string; 
-          signal?: string 
+          signal?: string;
+          wallet_address?: string;
         };
 
         // In production, verify with World ID cloud API
@@ -225,9 +226,50 @@ export default {
         // For development, we'll accept the verification
         // The actual verification happens client-side in MiniKit
         
+        const nullifierHash = payload.nullifier_hash || null;
+        
+        if (!nullifierHash) {
+          return new Response(JSON.stringify({ 
+            verified: false, 
+            error: 'Missing nullifier_hash' 
+          }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        // Store nullifier_hash in database to track unique humans
+        if (signal) {
+          try {
+            // Check if nullifier_hash already exists (prevent duplicate verifications)
+            const existing = await env.DB.prepare(
+              'SELECT wallet_address FROM users WHERE nullifier_hash = ?'
+            ).bind(nullifierHash).first<{ wallet_address?: string }>();
+
+            if (existing) {
+              // Update existing user's verification status
+              await env.DB.prepare(
+                'UPDATE users SET world_id_verified = 1, wallet_address = ? WHERE nullifier_hash = ?'
+              ).bind(signal.toLowerCase(), nullifierHash).run();
+            } else {
+              // Insert or update user with nullifier_hash
+              await env.DB.prepare(
+                `INSERT INTO users (wallet_address, world_id_verified, nullifier_hash)
+                 VALUES (?, 1, ?)
+                 ON CONFLICT(wallet_address) DO UPDATE SET 
+                   world_id_verified = 1,
+                   nullifier_hash = ?`
+              ).bind(signal.toLowerCase(), nullifierHash, nullifierHash).run();
+            }
+          } catch (dbError) {
+            console.error('Database error storing nullifier_hash:', dbError);
+            // Continue even if DB update fails (non-critical)
+          }
+        }
+        
         return new Response(JSON.stringify({
           verified: true,
-          nullifier_hash: payload.nullifier_hash || 'dev_nullifier',
+          nullifier_hash: nullifierHash,
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -399,12 +441,40 @@ export default {
     
     if (url.pathname === '/ws') {
       const username = url.searchParams.get('username');
+      const wallet = url.searchParams.get('wallet');
       
       if (!username) {
         return new Response(JSON.stringify({ error: 'Username required' }), {
           status: 400,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+
+      // Only verified users can enter the matching queue
+      // Check if user has a verified nullifier_hash
+      if (wallet) {
+        try {
+          const user = await env.DB.prepare(
+            'SELECT nullifier_hash, world_id_verified FROM users WHERE wallet_address = ?'
+          ).bind(wallet.toLowerCase()).first<{ nullifier_hash?: string | null; world_id_verified?: number }>();
+
+          if (!user || !user.world_id_verified || !user.nullifier_hash) {
+            return new Response(JSON.stringify({ 
+              error: 'User must be verified with World ID to enter matching queue' 
+            }), {
+              status: 403,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+        } catch (dbError) {
+          console.error('Database error checking verification:', dbError);
+          return new Response(JSON.stringify({ 
+            error: 'Failed to verify user status' 
+          }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
       }
 
       const id = env.MATCHING_QUEUE.idFromName('global-queue');

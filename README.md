@@ -111,6 +111,22 @@ The `wrangler.toml` is configured for `world.mind-alike.com`. Cloudflare will:
 - Provision SSL certificates
 - Route traffic to your Worker
 
+### Database Migrations
+
+After deploying, apply database migrations to add the `nullifier_hash` column:
+
+```bash
+# Apply migrations to production database
+npx wrangler d1 migrations apply mindalike_world_d1
+
+# Or for local development
+npx wrangler d1 migrations apply mindalike_world_d1 --local
+```
+
+The migration adds:
+- `nullifier_hash` column to `users` table (for tracking unique World ID verifications)
+- Unique index on `nullifier_hash` to prevent duplicate verifications
+
 ---
 
 ## 🔌 API Endpoints
