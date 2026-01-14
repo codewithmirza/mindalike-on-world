@@ -1,12 +1,22 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import Image from 'next/image';
 import { MiniKit, VerificationLevel } from '@worldcoin/minikit-js';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 
 // App states
-type AppState = 'landing' | 'authenticating' | 'verifying' | 'verified' | 'queuing' | 'matching' | 'matched' | 'error';
+type AppState =
+  | 'landing'
+  | 'authenticating'
+  | 'verifying'
+  | 'verified'
+  | 'queuing'
+  | 'matching'
+  | 'matched'
+  | 'payment_required'
+  | 'error';
 
 // User data interface
 interface UserData {
@@ -36,6 +46,9 @@ export default function MindalikeApp() {
   const [queuePosition, setQueuePosition] = useState<number>(0);
   const [isWorldApp, setIsWorldApp] = useState<boolean>(false);
   const [countdown, setCountdown] = useState<number>(5);
+  const [dailyMatches, setDailyMatches] = useState<number>(0);
+  const freeLimit = 5;
+  const remainingFree = Math.max(0, freeLimit - dailyMatches);
 
   // WebSocket ref
   const wsRef = useRef<WebSocket | null>(null);
@@ -50,6 +63,58 @@ export default function MindalikeApp() {
       if (!installed) {
         console.warn('MiniKit not installed - running in development mode');
       }
+    }
+  }, []);
+
+  // Handle WebSocket messages
+  const handleWSMessage = useCallback((message: WSMessage) => {
+    switch (message.type) {
+      case 'queue_status':
+        const statusPayload = message.payload as { position: number; total: number };
+        setQueuePosition(statusPayload.position);
+        break;
+
+      case 'matched':
+        const matchPayload = message.payload as { matchedUsername: string };
+        setMatch({
+          matchedUsername: matchPayload.matchedUsername,
+          matchedAt: Date.now(),
+        });
+        setAppState('matched');
+        startRedirectCountdown(matchPayload.matchedUsername);
+
+        // Increment daily matches count in backend (best-effort)
+        if (user?.walletAddress) {
+          fetch('/api/matches/increment', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wallet_address: user.walletAddress }),
+          })
+            .then((res) => res.json() as Promise<{ count?: number }>)
+            .then((data) => {
+              if (typeof data.count === 'number') {
+                setDailyMatches(data.count);
+              } else {
+                setDailyMatches((prev) => prev + 1);
+              }
+            })
+            .catch(() => {
+              setDailyMatches((prev) => prev + 1);
+            });
+        } else {
+          setDailyMatches((prev) => prev + 1);
+        }
+        break;
+
+      case 'error':
+        const errorPayload = message.payload as { message: string };
+        setError(errorPayload.message);
+        setAppState('error');
+        break;
+
+      case 'heartbeat':
+        wsRef.current?.send(JSON.stringify({ type: 'heartbeat' }));
+        break;
     }
   }, []);
 
@@ -101,40 +166,10 @@ export default function MindalikeApp() {
       setError('Failed to connect to matching service.');
       setAppState('error');
     }
-  }, [appState, user?.username]);
-
-  // Handle WebSocket messages
-  const handleWSMessage = useCallback((message: WSMessage) => {
-    switch (message.type) {
-      case 'queue_status':
-        const statusPayload = message.payload as { position: number; total: number };
-        setQueuePosition(statusPayload.position);
-        break;
-
-      case 'matched':
-        const matchPayload = message.payload as { matchedUsername: string };
-        setMatch({
-          matchedUsername: matchPayload.matchedUsername,
-          matchedAt: Date.now(),
-        });
-        setAppState('matched');
-        startRedirectCountdown(matchPayload.matchedUsername);
-        break;
-
-      case 'error':
-        const errorPayload = message.payload as { message: string };
-        setError(errorPayload.message);
-        setAppState('error');
-        break;
-
-      case 'heartbeat':
-        wsRef.current?.send(JSON.stringify({ type: 'heartbeat' }));
-        break;
-    }
-  }, []);
+  }, [appState, user?.username, handleWSMessage]);
 
   // Countdown and redirect to World Chat
-  const startRedirectCountdown = (matchedUsername: string) => {
+  const startRedirectCountdown = useCallback((matchedUsername: string) => {
     setCountdown(5);
     const interval = setInterval(() => {
       setCountdown((prev) => {
@@ -146,10 +181,10 @@ export default function MindalikeApp() {
         return prev - 1;
       });
     }, 1000);
-  };
+  }, []);
 
   // Redirect to World Chat
-  const redirectToChat = async (matchedUsername: string) => {
+  const redirectToChat = useCallback(async (matchedUsername: string) => {
     try {
       if (MiniKit.isInstalled()) {
         await MiniKit.commandsAsync.chat({
@@ -164,10 +199,10 @@ export default function MindalikeApp() {
       console.error('Failed to open chat:', e);
       setError('Failed to open chat. Please try again.');
     }
-  };
+  }, []);
 
   // Wallet Authentication
-  const handleWalletAuth = async () => {
+  const handleWalletAuth = useCallback(async () => {
     setAppState('authenticating');
     setError(null);
 
@@ -229,7 +264,7 @@ export default function MindalikeApp() {
       setError(e instanceof Error ? e.message : 'Authentication failed');
       setAppState('error');
     }
-  };
+  }, []);
 
   // World ID Verification
   const handleWorldIdVerify = async () => {
@@ -295,6 +330,19 @@ export default function MindalikeApp() {
         setUser({ ...user, isVerified: true });
       }
 
+      // Fetch today's match count once the user is verified
+      try {
+        if (user?.walletAddress) {
+          const res = await fetch(`/api/matches/today?wallet=${encodeURIComponent(user.walletAddress)}`);
+          if (res.ok) {
+            const data = await res.json() as { count: number; free_limit: number };
+            setDailyMatches(data.count ?? 0);
+          }
+        }
+      } catch {
+        // Non-fatal: user can still proceed, default count stays at 0
+      }
+
       setAppState('verified');
     } catch (e) {
       console.error('World ID verification error:', e);
@@ -304,8 +352,14 @@ export default function MindalikeApp() {
 
   // Start matching
   const handleFindMatch = () => {
-    if (!user?.username) {
+    if (!user?.username || !user.walletAddress) {
       setError('Please authenticate first');
+      return;
+    }
+
+    // Freemium gating: 5 free matches per day
+    if (dailyMatches >= freeLimit) {
+      setAppState('payment_required');
       return;
     }
 
@@ -352,11 +406,14 @@ export default function MindalikeApp() {
       {/* Header */}
       <header className="px-4 sm:px-6 py-4 flex items-center justify-between border-b border-border-primary bg-bg-3">
         <div className="flex items-center gap-2">
-          <div className="w-10 h-10 bg-brand-primary rounded-full flex items-center justify-center shadow-brand-primary">
-            <svg className="w-6 h-6 text-text-inverted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z" />
-            </svg>
-          </div>
+          <Image
+            src="/mindalike-logo.svg"
+            alt="Mindalike logo"
+            width={36}
+            height={36}
+            className="h-8 w-8 md:h-9 md:w-9"
+            priority
+          />
           <span className="text-xl font-display font-bold gradient-text">Mindalike</span>
         </div>
         {user && (
@@ -388,6 +445,7 @@ export default function MindalikeApp() {
         {appState === 'verified' && (
           <VerifiedView
             username={user?.username || ''}
+            remainingFree={remainingFree}
             onFindMatch={handleFindMatch}
           />
         )}
@@ -395,6 +453,7 @@ export default function MindalikeApp() {
         {(appState === 'queuing' || appState === 'matching') && (
           <MatchingView
             position={queuePosition}
+            remainingFree={remainingFree}
             onCancel={handleCancelMatch}
           />
         )}
@@ -405,6 +464,20 @@ export default function MindalikeApp() {
             countdown={countdown}
             onChatNow={() => redirectToChat(match.matchedUsername)}
             onFindAnother={handleFindAnother}
+          />
+        )}
+
+        {appState === 'payment_required' && user && (
+          <PaymentView
+            walletAddress={user.walletAddress}
+            remainingFree={remainingFree}
+            onClose={() => setAppState('verified')}
+            onPaymentSuccess={() => {
+              // After payment we effectively give 5 more free matches by reducing local count
+              setDailyMatches((prev) => Math.max(0, prev - 5));
+              setAppState('verified');
+            }}
+            setError={setError}
           />
         )}
 
@@ -567,7 +640,15 @@ function VerifyView({ onVerify, error }: { onVerify: () => void; error: string |
 }
 
 // Verified View Component
-function VerifiedView({ username, onFindMatch }: { username: string; onFindMatch: () => void }) {
+function VerifiedView({
+  username,
+  remainingFree,
+  onFindMatch,
+}: {
+  username: string;
+  remainingFree: number;
+  onFindMatch: () => void;
+}) {
   return (
     <Card variant="elevated" className="max-w-sm mx-auto w-full text-center space-y-6">
       <div className="w-24 h-24 bg-gradient-to-br from-success to-green-600 rounded-full flex items-center justify-center mx-auto shadow-lg animate-float">
@@ -585,6 +666,10 @@ function VerifiedView({ username, onFindMatch }: { username: string; onFindMatch
         
         <p className="text-body-sm text-text-tertiary">
           You can now connect with other verified humans around the world.
+        </p>
+
+        <p className="text-body-sm text-text-tertiary">
+          {remainingFree}/5 free matches left today
         </p>
       </div>
 
@@ -606,7 +691,15 @@ function VerifiedView({ username, onFindMatch }: { username: string; onFindMatch
 }
 
 // Matching View Component
-function MatchingView({ position, onCancel }: { position: number; onCancel: () => void }) {
+function MatchingView({
+  position,
+  remainingFree,
+  onCancel,
+}: {
+  position: number;
+  remainingFree: number;
+  onCancel: () => void;
+}) {
   return (
     <Card variant="elevated" className="max-w-sm mx-auto w-full text-center space-y-6">
       {/* Animated searching indicator */}
@@ -626,6 +719,10 @@ function MatchingView({ position, onCancel }: { position: number; onCancel: () =
         
         <p className="text-body-md text-text-secondary">
           Looking for another verified human
+        </p>
+
+        <p className="text-body-sm text-text-tertiary">
+          {remainingFree}/5 free matches left today
         </p>
 
         {position > 0 && (
@@ -745,6 +842,131 @@ function ErrorView({ message, onRetry }: { message: string; onRetry: () => void 
       >
         Try Again
       </Button>
+    </Card>
+  );
+}
+
+// Payment View Component
+function PaymentView({
+  walletAddress,
+  remainingFree,
+  onClose,
+  onPaymentSuccess,
+  setError,
+}: {
+  walletAddress: string;
+  remainingFree: number;
+  onClose: () => void;
+  onPaymentSuccess: () => void;
+  setError: (msg: string | null) => void;
+}) {
+  const [isPaying, setIsPaying] = useState(false);
+
+  const handlePay = async () => {
+    setIsPaying(true);
+    setError(null);
+
+    try {
+      if (!MiniKit.isInstalled()) {
+        setError('MiniKit is not available in this environment.');
+        setIsPaying(false);
+        return;
+      }
+
+      const reference = crypto.randomUUID().replace(/-/g, '');
+
+      // Create payment reference in backend
+      const createRes = await fetch('/api/payments/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference_id: reference, wallet_address: walletAddress }),
+      });
+
+      if (!createRes.ok) {
+        setError('Failed to initiate payment. Please try again.');
+        setIsPaying(false);
+        return;
+      }
+
+      const payload = {
+        reference,
+        to: '0x98f85f5ff0d253665a576773fffbf66d4e043004',
+        tokens: [
+          {
+            symbol: (MiniKit as any).Tokens?.WLD ?? 'WLD',
+            token_amount:
+              (MiniKit as any).tokenToDecimals
+                ? (MiniKit as any).tokenToDecimals(1, (MiniKit as any).Tokens?.WLD).toString()
+                : '1',
+          },
+        ],
+        description: 'Mindalike - Unlock more matches',
+      } as any;
+
+      const { finalPayload } = await MiniKit.commandsAsync.pay(payload);
+
+      if (finalPayload.status === 'success') {
+        const verifyRes = await fetch('/api/payments/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reference_id: reference,
+            transaction_id: finalPayload.transaction_id,
+            wallet_address: walletAddress,
+          }),
+        });
+
+        const data = await verifyRes.json() as { success?: boolean; error?: string };
+        if (verifyRes.ok && data.success) {
+          onPaymentSuccess();
+        } else {
+          setError(data.error || 'Payment could not be verified. Please try again.');
+        }
+      } else {
+        setError('Payment was cancelled or failed.');
+      }
+    } catch (e) {
+      console.error('Payment error', e);
+      setError('Payment failed. Please try again.');
+    } finally {
+      setIsPaying(false);
+    }
+  };
+
+  return (
+    <Card variant="elevated" className="max-w-sm mx-auto w-full text-center space-y-6">
+      <div className="space-y-2">
+        <h2 className="text-heading-lg font-display font-bold text-text-primary">
+          You&apos;ve reached your free limit
+        </h2>
+        <p className="text-body-md text-text-secondary">
+          You&apos;ve used your 5 free matches today. Pay 1 WLD to unlock 5 more matches.
+        </p>
+        <p className="text-body-sm text-text-tertiary">
+          Current free matches left today: {remainingFree}/5
+        </p>
+      </div>
+
+      <div className="space-y-3">
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full"
+          onClick={handlePay}
+          isLoading={isPaying}
+        >
+          Pay 1 WLD
+        </Button>
+        <Button
+          variant="secondary"
+          size="md"
+          className="w-full"
+          onClick={onClose}
+          disabled={isPaying}
+        >
+          Maybe later
+        </Button>
+      </div>
     </Card>
   );
 }

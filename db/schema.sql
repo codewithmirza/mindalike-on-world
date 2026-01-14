@@ -1,0 +1,23 @@
+-- Mindalike World Mini App - D1 schema
+
+CREATE TABLE IF NOT EXISTS users (
+  wallet_address TEXT PRIMARY KEY,
+  world_id_verified INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS daily_matches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  wallet_address TEXT NOT NULL,
+  date TEXT NOT NULL,
+  match_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (wallet_address, date)
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+  reference_id TEXT PRIMARY KEY,
+  wallet_address TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+

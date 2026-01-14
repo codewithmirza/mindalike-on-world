@@ -29,6 +29,21 @@ pattern = "world.mind-alike.com"
 custom_domain = true
 
 # ==============================================
+# D1 Database (Mindalike World Mini App)
+# ==============================================
+[[d1_databases]]
+binding = "DB"
+database_name = "mindalike_world_d1"
+database_id = "1b8f29b4-167c-450d-9631-66cc63e8a33e"
+
+# ==============================================
+# KV Namespace (Daily matches cache)
+# ==============================================
+[[kv_namespaces]]
+binding = "DAILY_MATCHES_CACHE"
+id = "6b2d7c13412e4b368c8eba97c15cb787"
+
+# ==============================================
 # Durable Objects (Real-time Matching Queue)
 # ==============================================
 [durable_objects]

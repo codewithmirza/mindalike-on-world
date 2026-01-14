@@ -1,14 +1,18 @@
 /**
  * Mindalike Unified Worker
  * Handles WebSocket matching + API routes + serves static assets
- * 
+ *
  * Domain: world.mind-alike.com
- * 
+ *
  * Routes:
  * - /ws?username=xxx → WebSocket for matching queue
  * - /api/nonce → Generate SIWE nonce
  * - /api/verify-siwe → Verify SIWE signature
  * - /api/verify-worldid → Verify World ID proof
+ * - /api/matches/today → Get today's match count
+ * - /api/matches/increment → Increment today's match count
+ * - /api/payments/create → Record pending payment reference
+ * - /api/payments/verify → Verify payment with World Developer Portal API
  * - /api/queue-status → Queue statistics
  * - /health → Health check
  * - /* → Static assets (Next.js)
@@ -18,6 +22,13 @@ export interface Env {
   MATCHING_QUEUE: DurableObjectNamespace;
   ASSETS: Fetcher;
   ENVIRONMENT: string;
+  // D1 database for Mindalike World mini app
+  DB: D1Database;
+  // KV cache for daily match counts
+  DAILY_MATCHES_CACHE: KVNamespace;
+  // Secrets for payment verification
+  WORLD_APP_ID: string;
+  WORLD_API_KEY: string;
 }
 
 // CORS headers
@@ -27,7 +38,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Upgrade, Connection',
 };
 
-// Simple in-memory nonce store (in production, use KV or D1)
+// Simple in-memory nonce store (per-instance)
 const nonceStore = new Map<string, { nonce: string; expires: number }>();
 
 // Generate random nonce
@@ -45,6 +56,65 @@ function cleanExpiredNonces() {
       nonceStore.delete(key);
     }
   }
+}
+
+// --- Helper functions for daily matches & payments -------------------------
+
+function getTodayKey(): string {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(now.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+async function getDailyMatchCount(env: Env, wallet: string): Promise<number> {
+  const today = getTodayKey();
+  const cacheKey = `daily_matches:${wallet}:${today}`;
+
+  const cached = await env.DAILY_MATCHES_CACHE.get(cacheKey, 'json') as { count?: number } | null;
+  if (cached && typeof cached.count === 'number') {
+    return cached.count;
+  }
+
+  const { results } = await env.DB.prepare(
+    'SELECT match_count FROM daily_matches WHERE wallet_address = ? AND date = ?'
+  ).bind(wallet, today).all<{ match_count: number }>();
+
+  const count = results?.[0]?.match_count ?? 0;
+  await env.DAILY_MATCHES_CACHE.put(cacheKey, JSON.stringify({ count }), { expirationTtl: 3600 });
+  return count;
+}
+
+async function incrementDailyMatchCount(env: Env, wallet: string): Promise<number> {
+  const today = getTodayKey();
+
+  await env.DB.prepare(
+    `INSERT INTO daily_matches (wallet_address, date, match_count)
+     VALUES (?, ?, 1)
+     ON CONFLICT(wallet_address, date) DO UPDATE SET match_count = match_count + 1`
+  ).bind(wallet, today).run();
+
+  const { results } = await env.DB.prepare(
+    'SELECT match_count FROM daily_matches WHERE wallet_address = ? AND date = ?'
+  ).bind(wallet, today).all<{ match_count: number }>();
+
+  const count = results?.[0]?.match_count ?? 0;
+  const cacheKey = `daily_matches:${wallet}:${today}`;
+  await env.DAILY_MATCHES_CACHE.put(cacheKey, JSON.stringify({ count }), { expirationTtl: 3600 });
+  return count;
+}
+
+async function createPaymentReference(env: Env, reference: string, wallet: string) {
+  await env.DB.prepare(
+    'INSERT OR IGNORE INTO payments (reference_id, wallet_address, status) VALUES (?, ?, ?)'
+  ).bind(reference, wallet, 'pending').run();
+}
+
+async function markPaymentStatus(env: Env, reference: string, status: string) {
+  await env.DB.prepare(
+    'UPDATE payments SET status = ? WHERE reference_id = ?'
+  ).bind(status, reference).run();
 }
 
 // Main worker handler
@@ -182,6 +252,145 @@ export default {
       });
       
       return queue.fetch(statusRequest);
+    }
+
+    // ==========================================
+    // Freemium API: daily matches
+    // ==========================================
+
+    if (url.pathname === '/api/matches/today' && request.method === 'GET') {
+      const wallet = url.searchParams.get('wallet');
+      if (!wallet) {
+        return new Response(JSON.stringify({ error: 'wallet required' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const count = await getDailyMatchCount(env, wallet.toLowerCase());
+      const freeLimit = 5;
+
+      return new Response(JSON.stringify({ count, free_limit: freeLimit }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/api/matches/increment' && request.method === 'POST') {
+      try {
+        const { wallet_address } = await request.json() as { wallet_address?: string };
+        if (!wallet_address) {
+          return new Response(JSON.stringify({ error: 'wallet_address required' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const count = await incrementDailyMatchCount(env, wallet_address.toLowerCase());
+        return new Response(JSON.stringify({ count }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch {
+        return new Response(JSON.stringify({ error: 'Failed to increment match count' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ==========================================
+    // Freemium API: payments
+    // ==========================================
+
+    if (url.pathname === '/api/payments/create' && request.method === 'POST') {
+      try {
+        const { reference_id, wallet_address } = await request.json() as { reference_id?: string; wallet_address?: string };
+        if (!reference_id || !wallet_address) {
+          return new Response(JSON.stringify({ error: 'reference_id and wallet_address required' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        await createPaymentReference(env, reference_id, wallet_address.toLowerCase());
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch {
+        return new Response(JSON.stringify({ error: 'Failed to create payment reference' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    if (url.pathname === '/api/payments/verify' && request.method === 'POST') {
+      try {
+        const { reference_id, transaction_id, wallet_address } = await request.json() as {
+          reference_id?: string;
+          transaction_id?: string;
+          wallet_address?: string;
+        };
+
+        if (!reference_id || !transaction_id || !wallet_address) {
+          return new Response(JSON.stringify({ error: 'reference_id, transaction_id and wallet_address required' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        if (!env.WORLD_APP_ID || !env.WORLD_API_KEY) {
+          return new Response(JSON.stringify({ error: 'Server not configured for payment verification' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const urlVerify = `https://developer.worldcoin.org/api/v2/minikit/transaction/${transaction_id}?app_id=${env.WORLD_APP_ID}&type=payment`;
+        const res = await fetch(urlVerify, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${env.WORLD_API_KEY}` },
+        });
+
+        if (!res.ok) {
+          await markPaymentStatus(env, reference_id, 'failed');
+          return new Response(JSON.stringify({ success: false, error: 'Failed to verify transaction' }), {
+            status: 502,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const tx = await res.json() as { reference?: string; transaction_status?: string };
+
+        if (tx.reference !== reference_id || tx.transaction_status === 'failed') {
+          await markPaymentStatus(env, reference_id, 'failed');
+          return new Response(JSON.stringify({ success: false, error: 'Transaction not valid' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        await markPaymentStatus(env, reference_id, 'success');
+
+        // Grant additional matches (+5) by effectively reducing today's count by 5,
+        // so the user gets 5 more \"free\" attempts.
+        const today = getTodayKey();
+        await env.DB.prepare(
+          `INSERT INTO daily_matches (wallet_address, date, match_count)
+           VALUES (?, ?, 0)
+           ON CONFLICT(wallet_address, date) DO UPDATE SET match_count = MAX(match_count - 5, 0)`
+        ).bind(wallet_address.toLowerCase(), today).run();
+
+        const newCount = await getDailyMatchCount(env, wallet_address.toLowerCase());
+
+        return new Response(JSON.stringify({ success: true, new_count: newCount, granted: 5 }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch {
+        return new Response(JSON.stringify({ success: false, error: 'Payment verification failed' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // ==========================================
