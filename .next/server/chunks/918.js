@@ -1,0 +1,1 @@
+"use strict";exports.id=918,exports.ids=[918],exports.modules={6918:(e,t,r)=>{r.r(t),r.d(t,{default:()=>s});let s=(0,r(8570).createProxy)(String.raw`C:\Users\mirza\Development\World\components\MindalikeApp.tsx#default`)}};

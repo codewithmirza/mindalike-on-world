@@ -1,0 +1,54 @@
+# ==============================================
+# Mindalike - Cloudflare Workers Configuration
+# Deploy to: world.mind-alike.com
+# ==============================================
+
+name = "mindalike"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Worker entry point
+main = "worker/index.ts"
+
+# Keep workers.dev for testing (separate from routes)
+workers_dev = true
+
+# ==============================================
+# Static Assets (Next.js build output)
+# ==============================================
+[assets]
+directory = "out"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# ==============================================
+# Custom Domain Configuration
+# ==============================================
+[[routes]]
+pattern = "world.mind-alike.com"
+custom_domain = true
+
+# ==============================================
+# Durable Objects (Real-time Matching Queue)
+# ==============================================
+[durable_objects]
+bindings = [
+  { name = "MATCHING_QUEUE", class_name = "MatchingQueue" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MatchingQueue"]
+
+# ==============================================
+# Environment Variables
+# ==============================================
+[vars]
+ENVIRONMENT = "production"
+
+# ==============================================
+# Development Server
+# ==============================================
+[dev]
+port = 8787
+local_protocol = "http"
