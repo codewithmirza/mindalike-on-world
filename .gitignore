@@ -37,6 +37,7 @@ node_modules
 !.vscode/launch.json
 !.vscode/extensions.json
 .next
+out
 
 # Operating System files
 .DS_Store
